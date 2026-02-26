@@ -5,8 +5,11 @@
   "steps": [
     { "action": "wait", "ms": 5000 },
     { "action": "click", "selector": "button[class*='bg-info']" },
-    { "action": "wait", "ms": 8000 },
-    { "action": "getText", "selector": "[class*='ring-warning']", "as": "shutdownTime" },
+    {
+      "action": "script",
+      "code": "const deadline = Date.now() + 60000; let text = ''; while (Date.now() < deadline) { const el = document.querySelector('[class*=\"ring-warning\"]'); text = el ? el.textContent.trim() : ''; if (text.includes('3h59m')) return text; await ctx.wait(10000); } return text;",
+      "as": "shutdownTime"
+    },
     {
       "action": "script",
       "code": "return '5878981847';",
@@ -15,7 +18,7 @@
     {
       "action": "assert",
       "variable": "shutdownTime",
-      "contains": "3h59m",
+      "contains": "3h 59m",
       "failMsg": "时间未重置"
     }
   ]

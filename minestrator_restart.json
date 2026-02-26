@@ -1,0 +1,22 @@
+{
+  "name": "minestrator_restart",
+  "label": "Minestrator 重启",
+  "url": "https://minestrator.com/my/server/421301",
+  "steps": [
+    { "action": "wait", "ms": 5000 },
+    { "action": "click", "selector": "button[class*='bg-info']" },
+    { "action": "wait", "ms": 8000 },
+    { "action": "getText", "selector": "[class*='ring-warning']", "as": "shutdownTime" },
+    {
+      "action": "script",
+      "code": "return '5878981847';",
+      "as": "tg_notify_chat_id"
+    },
+    {
+      "action": "assert",
+      "variable": "shutdownTime",
+      "contains": "3h59m",
+      "failMsg": "时间未重置"
+    }
+  ]
+}

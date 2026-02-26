@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebTask</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header-row">
+        <div>
+          <div class="title">WebTask</div>
+          <div class="subtitle">基于 Webhook 的任务执行器</div>
+        </div>
+        <button id="open-dashboard" class="secondary small">打开面板</button>
+      </header>
+
+      <section class="panel">
+        <div class="label">Webhook 地址</div>
+        <div class="row">
+          <input id="webhook-input" type="text" placeholder="http://localhost:3000" />
+          <button id="save-btn">保存</button>
+        </div>
+        <div class="hint">可填基地址或 /api/webtask，插件会自动拼接 /pending 与 /report</div>
+        <div class="row">
+          <select id="protocol-select">
+            <option value="webtask">WebTask 协议（/pending）</option>
+            <option value="shuaxin">刷新协议（/poll）</option>
+          </select>
+        </div>
+        <div class="row">
+          <input
+            id="interval-input"
+            type="number"
+            min="0.05"
+            step="0.05"
+            placeholder="0.25"
+          />
+          <div class="hint">轮询间隔（分钟）</div>
+        </div>
+        <div id="status" class="status">状态：--</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div class="label">任务</div>
+          <button id="import-open" class="secondary">+ 导入</button>
+        </div>
+        <div id="tasks" class="list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div class="label">最近日志</div>
+          <button id="clear-logs" class="secondary">清空</button>
+        </div>
+        <div id="logs" class="list"></div>
+      </section>
+    </div>
+
+    <div id="import-modal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-title">导入任务 JSON</div>
+        <textarea
+          id="import-text"
+          placeholder="{\n  \"name\": \"sample_task\",\n  \"label\": \"示例任务\",\n  \"url\": \"https://example.com\",\n  \"defaultData\": {},\n  \"steps\": [\n    {\"action\": \"wait\", \"ms\": 1000},\n    {\"action\": \"getText\", \"selector\": \".result\", \"as\": \"result\"}\n  ]\n}"
+        ></textarea>
+        <div id="import-error" class="modal-error"></div>
+        <div class="modal-actions">
+          <button id="import-confirm">导入</button>
+          <button id="import-cancel" class="secondary">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

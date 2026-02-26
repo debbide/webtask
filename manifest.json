@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "name": "WebTask",
+  "version": "0.1.0",
+  "description": "Lightweight browser automation task runner for webhooks.",
+  "permissions": ["alarms", "tabs", "storage", "<all_urls>"],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "webtask@local",
+      "strict_min_version": "91.0"
+    }
+  },
+  "browser_action": {
+    "default_title": "WebTask",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "dashboard.html",
+    "open_in_tab": true
+  }
+}

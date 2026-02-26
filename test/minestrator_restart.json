@@ -1,0 +1,6 @@
+{
+  "name": "minestrator_restart",
+  "label": "Minestrator 重启",
+  "url": "https://minestrator.com/my/server/421301",
+  "script": "async function(ctx) {\n  const selector = \"[class*='ring-warning']\";\n  const notifyId = \"5878981847\";\n  await ctx.wait(5000);\n  await ctx.click(\"button[class*='bg-info']\");\n  const deadline = Date.now() + 60000;\n  let text = \"\";\n  while (Date.now() < deadline) {\n    const el = ctx.query(selector);\n    text = el ? el.textContent.trim() : \"\";\n    if (text.includes(\"3h 59m\")) {\n      return {\n        success: true,\n        message: `重启成功，时间已重置：${text}`,\n        variables: { shutdownTime: text, tg_notify_chat_id: notifyId }\n      };\n    }\n    await ctx.wait(10000);\n  }\n  return {\n    success: false,\n    message: `时间未重置，当前：${text || \"未读取到时间\"}`,\n    keepOpen: true,\n    variables: { shutdownTime: text, tg_notify_chat_id: notifyId }\n  };\n}"
+}

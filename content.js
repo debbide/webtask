@@ -16,6 +16,47 @@ function applyTemplate(value, context) {
   });
 }
 
+function resolveHeaders(headers, context) {
+  if (!headers) {
+    return {};
+  }
+  let raw = headers;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch (error) {
+      return {};
+    }
+  }
+  if (!raw || typeof raw !== "object") {
+    return {};
+  }
+  const resolved = {};
+  Object.keys(raw).forEach((key) => {
+    const value = raw[key];
+    resolved[key] = typeof value === "string" ? applyTemplate(value, context) : value;
+  });
+  return resolved;
+}
+
+function resolveBody(body, context) {
+  if (body === undefined || body === null) {
+    return body;
+  }
+  if (typeof body === "string") {
+    return applyTemplate(body, context);
+  }
+  if (typeof body === "object") {
+    const resolved = Array.isArray(body) ? [] : {};
+    Object.keys(body).forEach((key) => {
+      const value = body[key];
+      resolved[key] = typeof value === "string" ? applyTemplate(value, context) : value;
+    });
+    return resolved;
+  }
+  return body;
+}
+
 async function findElement(selector, retries = 3, delayMs = 2000) {
   for (let attempt = 0; attempt < retries; attempt += 1) {
     const element = document.querySelector(selector);
@@ -74,6 +115,24 @@ function buildCtx(data, variables, taskName, startIndex) {
     },
     async waitFor(selector, timeout) {
       await waitForSelector(resolve(selector), timeout || 10000);
+    },
+    async http(options) {
+      const context = getContext();
+      const url = resolve(options && options.url ? options.url : "");
+      const headers = resolveHeaders(options && options.headers ? options.headers : {}, context);
+      const body = resolveBody(options && options.body !== undefined ? options.body : undefined, context);
+      const method = options && options.method ? String(options.method) : "GET";
+      const responseType = options && options.responseType ? String(options.responseType) : "json";
+      const timeoutMs = options && options.timeoutMs ? Number(options.timeoutMs) : 0;
+      return api.runtime.sendMessage({
+        type: "httpRequest",
+        url,
+        method,
+        headers,
+        body,
+        responseType,
+        timeoutMs
+      });
     },
     async reload() {
       ctx._reloading = true;
@@ -172,6 +231,46 @@ async function runSteps(payload) {
             variables,
             keepOpen: true
           };
+        }
+        break;
+      }
+      case "http": {
+        const url = applyTemplate(step.url || "", context);
+        if (!url) {
+          throw new Error("Missing http url");
+        }
+        const headers = resolveHeaders(step.headers, context);
+        const body = resolveBody(step.body, context);
+        const responseType = step.responseType || "json";
+        const timeoutMs = step.timeoutMs || 0;
+        const response = await api.runtime.sendMessage({
+          type: "httpRequest",
+          url,
+          method: step.method || "GET",
+          headers,
+          body,
+          responseType,
+          timeoutMs
+        });
+        if (step.failOnStatus && !response.ok) {
+          return {
+            success: false,
+            message: response.error || `HTTP ${response.status}`,
+            variables,
+            keepOpen: !!step.keepOpen
+          };
+        }
+        if (step.as) {
+          variables[step.as] = response.data;
+          context[step.as] = response.data;
+        }
+        if (step.asStatus) {
+          variables[step.asStatus] = response.status;
+          context[step.asStatus] = response.status;
+        }
+        if (step.asHeaders) {
+          variables[step.asHeaders] = response.headers;
+          context[step.asHeaders] = response.headers;
         }
         break;
       }

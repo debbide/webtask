@@ -21,8 +21,12 @@
         <div class="row">
           <input id="webhook-input" type="text" placeholder="http://localhost:3000" />
           <button id="save-btn">保存</button>
+          <button id="test-connection" class="secondary">测试</button>
         </div>
         <div class="hint">可填基地址或 /api/webtask，插件会自动拼接 /pending 与 /report</div>
+        <div class="row">
+          <input id="api-key-input" type="password" placeholder="API Key (可选)" />
+        </div>
         <div class="row">
           <select id="protocol-select">
             <option value="webtask">WebTask 协议（/pending）</option>

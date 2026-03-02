@@ -1,7 +1,9 @@
 const api = typeof browser !== "undefined" ? browser : chrome;
 
 const input = document.getElementById("webhook-input");
+const apiKeyInput = document.getElementById("api-key-input");
 const saveBtn = document.getElementById("save-btn");
+const testBtn = document.getElementById("test-connection");
 const statusEl = document.getElementById("status");
 const tasksEl = document.getElementById("tasks");
 const logsEl = document.getElementById("logs");
@@ -134,6 +136,7 @@ async function loadState() {
     return;
   }
   input.value = state.webhookUrl || "";
+  apiKeyInput.value = state.webtaskApiKey || "";
   intervalInput.value = state.pollIntervalMinutes || "";
   protocolSelect.value = state.protocol || "webtask";
   renderStatus(state.connection || {});
@@ -162,9 +165,18 @@ function validateTask(task) {
     return "任务 URL 不能为空";
   }
   const hasSteps = Array.isArray(task.steps) && task.steps.length > 0;
-  const hasScript = typeof task.script === "string" && task.script.trim();
+  const hasScriptString = typeof task.script === "string" && task.script.trim();
+  const hasScriptArray = Array.isArray(task.script) && task.script.length > 0;
+  const hasScript = hasScriptString || hasScriptArray;
   if (!hasSteps && !hasScript) {
     return "必须提供 steps 或 script";
+  }
+  if (hasScriptArray) {
+    for (const line of task.script) {
+      if (typeof line !== "string") {
+        return "script 数组每一项必须是字符串";
+      }
+    }
   }
   if (hasSteps) {
     for (const step of task.steps) {
@@ -174,6 +186,13 @@ function validateTask(task) {
     }
   }
   return "";
+}
+
+function normalizeTask(task) {
+  if (Array.isArray(task.script)) {
+    return { ...task, script: task.script.join("\n") };
+  }
+  return task;
 }
 
 async function importTask() {
@@ -190,6 +209,7 @@ async function importTask() {
     importError.textContent = error;
     return;
   }
+  task = normalizeTask(task);
   const exists = currentTasks.find((item) => item.name === task.name);
   const allowOverwrite = exists ? window.confirm("任务已存在，是否覆盖？") : false;
   if (exists && !allowOverwrite) {
@@ -209,6 +229,7 @@ async function importTask() {
 
 saveBtn.addEventListener("click", async () => {
   await api.runtime.sendMessage({ type: "setWebhookUrl", webhookUrl: input.value.trim() });
+  await api.storage.local.set({ webtaskApiKey: apiKeyInput.value.trim() });
   await api.runtime.sendMessage({ type: "setProtocol", protocol: protocolSelect.value });
   const intervalValue = parseFloat(intervalInput.value);
   if (Number.isFinite(intervalValue) && intervalValue > 0) {
@@ -218,6 +239,15 @@ saveBtn.addEventListener("click", async () => {
     });
   }
   await loadState();
+});
+
+testBtn.addEventListener("click", async () => {
+  const response = await api.runtime.sendMessage({ type: "testConnection" });
+  if (!response || !response.ok) {
+    window.alert(response && response.message ? response.message : "连接失败");
+  } else {
+    window.alert("连接成功");
+  }
 });
 
 importOpen.addEventListener("click", showImportModal);

@@ -28,6 +28,7 @@ let currentJob = null;
 async function getStoredState() {
   const data = await api.storage.local.get([
     "webhookUrl",
+    "webtaskApiKey",
     "connection",
     "taskStatus",
     "logs",
@@ -38,6 +39,7 @@ async function getStoredState() {
   ]);
   return {
     webhookUrl: data.webhookUrl || DEFAULT_WEBHOOK_URL,
+    webtaskApiKey: data.webtaskApiKey || "",
     connection: data.connection || { connected: false, lastError: "", lastCheck: 0 },
     taskStatus: data.taskStatus || {},
     logs: data.logs || [],
@@ -51,6 +53,7 @@ async function getStoredState() {
 async function ensureDefaults() {
   const data = await api.storage.local.get([
     "webhookUrl",
+    "webtaskApiKey",
     "connection",
     "taskStatus",
     "logs",
@@ -62,6 +65,9 @@ async function ensureDefaults() {
   const updates = {};
   if (!data.webhookUrl) {
     updates.webhookUrl = DEFAULT_WEBHOOK_URL;
+  }
+  if (!data.webtaskApiKey) {
+    updates.webtaskApiKey = "";
   }
   if (!data.connection) {
     updates.connection = { connected: false, lastError: "", lastCheck: 0 };
@@ -161,9 +167,18 @@ function validateTask(task) {
     return "Task url is required";
   }
   const hasSteps = Array.isArray(task.steps) && task.steps.length > 0;
-  const hasScript = typeof task.script === "string" && task.script.trim();
+  const hasScriptString = typeof task.script === "string" && task.script.trim();
+  const hasScriptArray = Array.isArray(task.script) && task.script.length > 0;
+  const hasScript = hasScriptString || hasScriptArray;
   if (!hasSteps && !hasScript) {
     return "Task requires steps or script";
+  }
+  if (hasScriptArray) {
+    for (const line of task.script) {
+      if (typeof line !== "string") {
+        return "Script lines must be strings";
+      }
+    }
   }
   if (hasSteps) {
     for (const step of task.steps) {
@@ -182,6 +197,14 @@ function validateTask(task) {
     return "Task enabled must be boolean";
   }
   return "";
+}
+
+function normalizeTask(task) {
+  const normalized = { ...task };
+  if (Array.isArray(normalized.script)) {
+    normalized.script = normalized.script.join("\n");
+  }
+  return normalized;
 }
 
 async function updateConnection(connected, lastError) {
@@ -220,9 +243,14 @@ async function reportToWebhook(taskName, success, message, variables) {
   try {
     const baseUrl = webhookUrl.replace(/\/+$/, "");
     const apiBase = baseUrl.endsWith("/api/webtask") ? baseUrl : `${baseUrl}/api/webtask`;
+    const headers = { "Content-Type": "application/json" };
+    if (state.webtaskApiKey) {
+      headers["X-API-KEY"] = state.webtaskApiKey;
+      headers["Authorization"] = `Bearer ${state.webtaskApiKey}`;
+    }
     await fetch(`${apiBase}/report`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ task: taskName, success, message, variables: variables || {} })
     });
   } catch (error) {
@@ -287,6 +315,12 @@ async function startTask(taskName, data, manualTrigger) {
     manualTrigger: !!manualTrigger
   };
 
+  const state = await getStoredState();
+  if (state.webtaskApiKey) {
+    job.variables.api_key = state.webtaskApiKey;
+    job.variables.API_KEY = state.webtaskApiKey;
+  }
+
   const timeoutMs = Number.isFinite(Number(task.timeout)) ? Number(task.timeout) : TASK_TIMEOUT_MS;
   job.timeoutId = setTimeout(() => {
     finishJob(job, false, "Task timeout", job.variables, false);
@@ -326,7 +360,12 @@ async function handlePoll() {
 
     const baseUrl = webhookUrl.replace(/\/+$/, "");
     const apiBase = baseUrl.endsWith("/api/webtask") ? baseUrl : `${baseUrl}/api/webtask`;
-    const response = await fetch(`${apiBase}/pending`, { cache: "no-store" });
+    const headers = {};
+    if (state.webtaskApiKey) {
+      headers["X-API-KEY"] = state.webtaskApiKey;
+      headers["Authorization"] = `Bearer ${state.webtaskApiKey}`;
+    }
+    const response = await fetch(`${apiBase}/pending`, { cache: "no-store", headers });
     if (!response.ok) {
       await updateConnection(false, `HTTP ${response.status}`);
       return;
@@ -389,11 +428,75 @@ api.runtime.onMessage.addListener((message, sender) => {
     return undefined;
   }
 
+  if (message.type === "httpRequest") {
+    return (async () => {
+      const url = message.url || "";
+      if (!url || typeof url !== "string") {
+        return { ok: false, status: 0, error: "Invalid url" };
+      }
+      const method = (message.method || "GET").toUpperCase();
+      const headers = message.headers && typeof message.headers === "object" ? { ...message.headers } : {};
+      let body = message.body;
+      if (body && typeof body === "object" && !(body instanceof Blob) && !(body instanceof ArrayBuffer)) {
+        body = JSON.stringify(body);
+        if (!headers["Content-Type"]) {
+          headers["Content-Type"] = "application/json";
+        }
+      }
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timeoutMs = Number.isFinite(Number(message.timeoutMs)) ? Number(message.timeoutMs) : 0;
+      let timeoutId = null;
+      if (controller && timeoutMs > 0) {
+        timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      }
+      try {
+        const response = await fetch(url, {
+          method,
+          headers,
+          body,
+          signal: controller ? controller.signal : undefined
+        });
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        const responseHeaders = {};
+        response.headers.forEach((value, key) => {
+          responseHeaders[key] = value;
+        });
+        const responseType = message.responseType || "json";
+        let data = null;
+        if (responseType === "text") {
+          data = await response.text();
+        } else if (responseType === "raw") {
+          data = null;
+        } else {
+          try {
+            data = await response.json();
+          } catch (error) {
+            data = await response.text();
+          }
+        }
+        return {
+          ok: response.ok,
+          status: response.status,
+          data,
+          headers: responseHeaders
+        };
+      } catch (error) {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        return { ok: false, status: 0, error: error.message || "request failed" };
+      }
+    })();
+  }
+
   if (message.type === "getState") {
     return (async () => {
       const state = await getStoredState();
       return {
         webhookUrl: state.webhookUrl,
+        webtaskApiKey: state.webtaskApiKey,
         connection: state.connection,
         taskStatus: state.taskStatus,
         logs: state.logs,
@@ -421,6 +524,42 @@ api.runtime.onMessage.addListener((message, sender) => {
     })();
   }
 
+  if (message.type === "testConnection") {
+    return (async () => {
+      const state = await getStoredState();
+      const webhookUrl = state.webhookUrl;
+      if (!webhookUrl) {
+        return { ok: false, message: "Webhook 地址为空" };
+      }
+      try {
+        const baseUrl = webhookUrl.replace(/\/+$/, "");
+        const apiBase = baseUrl.endsWith("/api/webtask") ? baseUrl : `${baseUrl}/api/webtask`;
+        const headers = {};
+        if (state.webtaskApiKey) {
+          headers["X-API-KEY"] = state.webtaskApiKey;
+          headers["Authorization"] = `Bearer ${state.webtaskApiKey}`;
+        }
+        const response = await fetch(`${apiBase}/pending`, { cache: "no-store", headers });
+        if (!response.ok) {
+          await updateConnection(false, `HTTP ${response.status}`);
+          return { ok: false, message: `HTTP ${response.status}` };
+        }
+        await updateConnection(true, "");
+        return { ok: true };
+      } catch (error) {
+        await updateConnection(false, error.message || "network error");
+        return { ok: false, message: error.message || "network error" };
+      }
+    })();
+  }
+
+  if (message.type === "setWebtaskApiKey") {
+    return (async () => {
+      await api.storage.local.set({ webtaskApiKey: message.webtaskApiKey || "" });
+      return { ok: true };
+    })();
+  }
+
   if (message.type === "setProtocol") {
     return (async () => {
       const protocol = message.protocol === "shuaxin" ? "shuaxin" : "webtask";
@@ -441,13 +580,13 @@ api.runtime.onMessage.addListener((message, sender) => {
     })();
   }
 
-  if (message.type === "importTask") {
-    return (async () => {
-      const task = message.task;
-      const error = validateTask(task);
-      if (error) {
-        return { ok: false, message: error };
-      }
+    if (message.type === "importTask") {
+      return (async () => {
+        const task = normalizeTask(message.task);
+        const error = validateTask(task);
+        if (error) {
+          return { ok: false, message: error };
+        }
       const tasks = await getTasks();
       const exists = tasks.find((item) => item.name === task.name);
       if (exists && !message.allowOverwrite) {

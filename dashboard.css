@@ -89,6 +89,12 @@ input#task-search {
   min-width: 180px;
 }
 
+input#client-id-input {
+  min-width: 260px;
+  font-family: "IBM Plex Mono", "Segoe UI", monospace;
+  font-size: 12px;
+}
+
 button {
   padding: 8px 12px;
   border-radius: 8px;

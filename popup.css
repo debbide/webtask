@@ -74,6 +74,16 @@ input {
   color: #e7e9ee;
 }
 
+input[readonly] {
+  color: #cbd2dd;
+  font-family: "IBM Plex Mono", "Segoe UI", monospace;
+  font-size: 11px;
+}
+
+.client-row button {
+  white-space: nowrap;
+}
+
 select {
   flex: 1;
   padding: 8px 10px;

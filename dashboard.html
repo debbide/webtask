@@ -31,6 +31,8 @@
             <option value="webtask">WebTask 协议（/pending）</option>
             <option value="shuaxin">刷新协议（/poll）</option>
           </select>
+          <input id="client-id-input" type="text" readonly placeholder="Client ID" />
+          <button id="copy-client-id" class="secondary btn">复制ID</button>
           <input
             id="interval-input"
             type="number"
@@ -40,6 +42,7 @@
           />
           <div class="hint">轮询间隔（分钟）</div>
         </div>
+        <div class="hint">target_client_id 请填这个 Client ID</div>
         <div id="status" class="status">状态：--</div>
       </section>
 

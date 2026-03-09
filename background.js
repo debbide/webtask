@@ -5,6 +5,9 @@ const DEFAULT_POLL_INTERVAL_MINUTES = 0.25;
 const TASK_TIMEOUT_MS = 60000;
 const LOG_LIMIT = 10;
 const DEFAULT_PROTOCOL = "webtask";
+const WS_RECONNECT_BASE_MS = 2000;
+const WS_RECONNECT_MAX_MS = 60000;
+const HEARTBEAT_INTERVAL_MS = 30000;
 
 const DEFAULT_TASKS = [
   {
@@ -24,6 +27,9 @@ const DEFAULT_TASKS = [
 ];
 
 let currentJob = null;
+let wsClient = null;
+let wsReconnectTimer = null;
+let wsReconnectAttempts = 0;
 
 async function getStoredState() {
   const data = await api.storage.local.get([
@@ -35,7 +41,8 @@ async function getStoredState() {
     "pollIntervalMinutes",
     "tasks",
     "protocol",
-    "shuaxinCursor"
+    "shuaxinCursor",
+    "clientId"
   ]);
   return {
     webhookUrl: data.webhookUrl || DEFAULT_WEBHOOK_URL,
@@ -46,7 +53,8 @@ async function getStoredState() {
     pollIntervalMinutes: data.pollIntervalMinutes || DEFAULT_POLL_INTERVAL_MINUTES,
     tasks: data.tasks || [],
     protocol: data.protocol || DEFAULT_PROTOCOL,
-    shuaxinCursor: data.shuaxinCursor || "0"
+    shuaxinCursor: data.shuaxinCursor || "0",
+    clientId: data.clientId || ""
   };
 }
 
@@ -60,7 +68,8 @@ async function ensureDefaults() {
     "pollIntervalMinutes",
     "tasks",
     "protocol",
-    "shuaxinCursor"
+    "shuaxinCursor",
+    "clientId"
   ]);
   const updates = {};
   if (!data.webhookUrl) {
@@ -90,6 +99,12 @@ async function ensureDefaults() {
   if (!data.shuaxinCursor) {
     updates.shuaxinCursor = "0";
   }
+  if (!data.clientId) {
+    updates.clientId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
   if (Object.keys(updates).length) {
     await api.storage.local.set(updates);
   }
@@ -99,6 +114,155 @@ async function schedulePolling(intervalMinutes) {
   const minutes = intervalMinutes || DEFAULT_POLL_INTERVAL_MINUTES;
   await api.alarms.clear("webtask_poll");
   api.alarms.create("webtask_poll", { periodInMinutes: minutes });
+}
+
+function toWsUrl(httpUrl) {
+  if (!httpUrl) return "";
+  try {
+    const parsed = new URL(httpUrl);
+    parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+    return parsed.toString().replace(/\/+$/, "");
+  } catch (error) {
+    return "";
+  }
+}
+
+function buildWebtaskApiBase(webhookUrl) {
+  const baseUrl = (webhookUrl || "").replace(/\/+$/, "");
+  return baseUrl.endsWith("/api/webtask") ? baseUrl : `${baseUrl}/api/webtask`;
+}
+
+function buildAuthHeaders(apiKey) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers["X-API-KEY"] = apiKey;
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+  return headers;
+}
+
+function clearWsReconnectTimer() {
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+}
+
+function clearJobHeartbeat(job) {
+  if (job && job.heartbeatId) {
+    clearInterval(job.heartbeatId);
+    job.heartbeatId = null;
+  }
+}
+
+async function sendJobHeartbeat(job) {
+  if (!job || !job.serverJobId) return;
+  const state = await getStoredState();
+  const webhookUrl = state.webhookUrl;
+  if (!webhookUrl) return;
+  try {
+    const apiBase = buildWebtaskApiBase(webhookUrl);
+    const headers = buildAuthHeaders(state.webtaskApiKey);
+    await fetch(`${apiBase}/heartbeat`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        job_id: job.serverJobId,
+        client_id: state.clientId,
+        extend_seconds: 180
+      })
+    });
+  } catch (error) {
+    await addLog({
+      time: Date.now(),
+      task: job.task ? job.task.name : "heartbeat",
+      success: false,
+      message: `Heartbeat failed: ${error.message || "network error"}`
+    });
+  }
+}
+
+function scheduleWsReconnect() {
+  clearWsReconnectTimer();
+  const delay = Math.min(WS_RECONNECT_BASE_MS * Math.pow(2, wsReconnectAttempts), WS_RECONNECT_MAX_MS);
+  wsReconnectAttempts += 1;
+  wsReconnectTimer = setTimeout(() => {
+    connectWebtaskSocket();
+  }, delay);
+}
+
+async function connectWebtaskSocket() {
+  if (typeof WebSocket === "undefined") {
+    return;
+  }
+  const state = await getStoredState();
+  if (state.protocol !== "webtask" || !state.webhookUrl) {
+    if (wsClient) {
+      try {
+        wsClient.close();
+      } catch (error) {
+        // Ignore close errors
+      }
+      wsClient = null;
+    }
+    clearWsReconnectTimer();
+    return;
+  }
+
+  if (wsClient && (wsClient.readyState === WebSocket.OPEN || wsClient.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
+  const wsBase = toWsUrl(state.webhookUrl);
+  if (!wsBase) {
+    await updateConnection(false, "Invalid webhook URL");
+    return;
+  }
+  const wsUrlObj = new URL(`${wsBase}/api/webtask/ws`);
+  wsUrlObj.searchParams.set("client_id", state.clientId);
+  if (state.webtaskApiKey) {
+    wsUrlObj.searchParams.set("api_key", state.webtaskApiKey);
+  }
+
+  try {
+    wsClient = new WebSocket(wsUrlObj.toString());
+  } catch (error) {
+    await updateConnection(false, error.message || "websocket error");
+    scheduleWsReconnect();
+    return;
+  }
+
+  wsClient.addEventListener("open", async () => {
+    wsReconnectAttempts = 0;
+    clearWsReconnectTimer();
+    await updateConnection(true, "");
+  });
+
+  wsClient.addEventListener("message", async (event) => {
+    let payload = null;
+    try {
+      payload = JSON.parse(event.data);
+    } catch (error) {
+      return;
+    }
+    if (!payload || typeof payload !== "object") return;
+    if (payload.type === "task_available" && !currentJob) {
+      handlePoll("ws");
+    }
+    if (payload.type === "ping" && wsClient && wsClient.readyState === WebSocket.OPEN) {
+      wsClient.send(JSON.stringify({ type: "pong", ts: Date.now() }));
+    }
+  });
+
+  wsClient.addEventListener("close", async () => {
+    wsClient = null;
+    await updateConnection(false, "websocket disconnected");
+    scheduleWsReconnect();
+  });
+
+  wsClient.addEventListener("error", async () => {
+    await updateConnection(false, "websocket error");
+  });
 }
 
 function buildUrl(template, data) {
@@ -234,24 +398,36 @@ async function updateTaskStatus(taskName, success, message) {
   await api.storage.local.set({ taskStatus });
 }
 
-async function reportToWebhook(taskName, success, message, variables) {
+async function reportToWebhook(taskName, success, message, variables, jobId) {
   const state = await getStoredState();
   const webhookUrl = state.webhookUrl;
   if (!webhookUrl) {
     return;
   }
-  try {
-    const baseUrl = webhookUrl.replace(/\/+$/, "");
-    const apiBase = baseUrl.endsWith("/api/webtask") ? baseUrl : `${baseUrl}/api/webtask`;
-    const headers = { "Content-Type": "application/json" };
-    if (state.webtaskApiKey) {
-      headers["X-API-KEY"] = state.webtaskApiKey;
-      headers["Authorization"] = `Bearer ${state.webtaskApiKey}`;
+  const cleanVariables = {};
+  if (variables && typeof variables === "object") {
+    for (const [key, value] of Object.entries(variables)) {
+      const lower = String(key).toLowerCase();
+      if (lower === "api_key" || lower.includes("token") || lower.includes("password")) {
+        continue;
+      }
+      cleanVariables[key] = value;
     }
+  }
+  try {
+    const apiBase = buildWebtaskApiBase(webhookUrl);
+    const headers = buildAuthHeaders(state.webtaskApiKey);
     await fetch(`${apiBase}/report`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ task: taskName, success, message, variables: variables || {} })
+      body: JSON.stringify({
+        task: taskName,
+        success,
+        message,
+        variables: cleanVariables,
+        client_id: state.clientId,
+        job_id: jobId || undefined
+      })
     });
   } catch (error) {
     await updateConnection(false, error.message || "report failed");
@@ -263,6 +439,7 @@ async function finishJob(job, success, message, variables, keepOpen) {
     return;
   }
   clearTimeout(job.timeoutId);
+  clearJobHeartbeat(job);
   currentJob = null;
   await updateTaskStatus(job.task.name, success, message);
   await addLog({
@@ -271,7 +448,7 @@ async function finishJob(job, success, message, variables, keepOpen) {
     success,
     message: message || ""
   });
-  await reportToWebhook(job.task.name, success, message, variables);
+  await reportToWebhook(job.task.name, success, message, variables, job.serverJobId || "");
   if (!keepOpen) {
     try {
       await api.tabs.remove(job.tabId);
@@ -281,7 +458,8 @@ async function finishJob(job, success, message, variables, keepOpen) {
   }
 }
 
-async function startTask(taskName, data, manualTrigger) {
+async function startTask(taskName, data, manualTrigger, options) {
+  const taskOptions = options || {};
   if (currentJob) {
     return { ok: false, message: "busy" };
   }
@@ -291,13 +469,13 @@ async function startTask(taskName, data, manualTrigger) {
   if (!task) {
     await updateTaskStatus(taskName, false, "Unknown task");
     await addLog({ time: Date.now(), task: taskName, success: false, message: "Unknown task" });
-    await reportToWebhook(taskName, false, "Unknown task", {});
+    await reportToWebhook(taskName, false, "Unknown task", {}, "");
     return { ok: false, message: "unknown task" };
   }
   if (task.enabled === false) {
     await updateTaskStatus(taskName, false, "Task disabled");
     await addLog({ time: Date.now(), task: taskName, success: false, message: "Task disabled" });
-    await reportToWebhook(taskName, false, "Task disabled", {});
+    await reportToWebhook(taskName, false, "Task disabled", {}, "");
     return { ok: false, message: "task disabled" };
   }
 
@@ -312,7 +490,9 @@ async function startTask(taskName, data, manualTrigger) {
     variables: {},
     state: "waiting",
     timeoutId: null,
-    manualTrigger: !!manualTrigger
+    heartbeatId: null,
+    manualTrigger: !!manualTrigger,
+    serverJobId: taskOptions.jobId || ""
   };
 
   const state = await getStoredState();
@@ -326,11 +506,17 @@ async function startTask(taskName, data, manualTrigger) {
     finishJob(job, false, "Task timeout", job.variables, false);
   }, timeoutMs);
 
+  if (job.serverJobId) {
+    job.heartbeatId = setInterval(() => {
+      sendJobHeartbeat(job);
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
   currentJob = job;
   return { ok: true };
 }
 
-async function handlePoll() {
+async function handlePoll(source) {
   const state = await getStoredState();
   const webhookUrl = state.webhookUrl;
   if (!webhookUrl || (state.protocol === "webtask" && currentJob)) {
@@ -358,14 +544,11 @@ async function handlePoll() {
       return;
     }
 
-    const baseUrl = webhookUrl.replace(/\/+$/, "");
-    const apiBase = baseUrl.endsWith("/api/webtask") ? baseUrl : `${baseUrl}/api/webtask`;
-    const headers = {};
-    if (state.webtaskApiKey) {
-      headers["X-API-KEY"] = state.webtaskApiKey;
-      headers["Authorization"] = `Bearer ${state.webtaskApiKey}`;
-    }
-    const response = await fetch(`${apiBase}/pending`, { cache: "no-store", headers });
+    const apiBase = buildWebtaskApiBase(webhookUrl);
+    const headers = buildAuthHeaders(state.webtaskApiKey);
+    const pendingUrl = new URL(`${apiBase}/pending`);
+    pendingUrl.searchParams.set("client_id", state.clientId);
+    const response = await fetch(pendingUrl.toString(), { cache: "no-store", headers });
     if (!response.ok) {
       await updateConnection(false, `HTTP ${response.status}`);
       return;
@@ -375,7 +558,17 @@ async function handlePoll() {
     if (!payload || !payload.task) {
       return;
     }
-    await startTask(payload.task, payload.data || {}, false);
+    const started = await startTask(payload.task, payload.data || {}, false, {
+      jobId: payload.job_id || ""
+    });
+    if (!started.ok && source === "ws") {
+      await addLog({
+        time: Date.now(),
+        task: payload.task,
+        success: false,
+        message: `WS dispatch skipped: ${started.message || "unknown"}`
+      });
+    }
   } catch (error) {
     await updateConnection(false, error.message || "network error");
   }
@@ -502,6 +695,7 @@ api.runtime.onMessage.addListener((message, sender) => {
         logs: state.logs,
         pollIntervalMinutes: state.pollIntervalMinutes,
         protocol: state.protocol,
+        clientId: state.clientId,
         tasks: (state.tasks || []).map((task) => ({
           name: task.name,
           label: task.label,
@@ -520,6 +714,7 @@ api.runtime.onMessage.addListener((message, sender) => {
     return (async () => {
       await api.storage.local.set({ webhookUrl: message.webhookUrl || "" });
       await api.storage.local.set({ shuaxinCursor: "0" });
+      await connectWebtaskSocket();
       return { ok: true };
     })();
   }
@@ -532,19 +727,17 @@ api.runtime.onMessage.addListener((message, sender) => {
         return { ok: false, message: "Webhook 地址为空" };
       }
       try {
-        const baseUrl = webhookUrl.replace(/\/+$/, "");
-        const apiBase = baseUrl.endsWith("/api/webtask") ? baseUrl : `${baseUrl}/api/webtask`;
-        const headers = {};
-        if (state.webtaskApiKey) {
-          headers["X-API-KEY"] = state.webtaskApiKey;
-          headers["Authorization"] = `Bearer ${state.webtaskApiKey}`;
-        }
-        const response = await fetch(`${apiBase}/pending`, { cache: "no-store", headers });
+        const apiBase = buildWebtaskApiBase(webhookUrl);
+        const headers = buildAuthHeaders(state.webtaskApiKey);
+        const testUrl = new URL(`${apiBase}/pending`);
+        testUrl.searchParams.set("client_id", state.clientId);
+        const response = await fetch(testUrl.toString(), { cache: "no-store", headers });
         if (!response.ok) {
           await updateConnection(false, `HTTP ${response.status}`);
           return { ok: false, message: `HTTP ${response.status}` };
         }
         await updateConnection(true, "");
+        connectWebtaskSocket();
         return { ok: true };
       } catch (error) {
         await updateConnection(false, error.message || "network error");
@@ -556,6 +749,7 @@ api.runtime.onMessage.addListener((message, sender) => {
   if (message.type === "setWebtaskApiKey") {
     return (async () => {
       await api.storage.local.set({ webtaskApiKey: message.webtaskApiKey || "" });
+      await connectWebtaskSocket();
       return { ok: true };
     })();
   }
@@ -564,6 +758,7 @@ api.runtime.onMessage.addListener((message, sender) => {
     return (async () => {
       const protocol = message.protocol === "shuaxin" ? "shuaxin" : "webtask";
       await api.storage.local.set({ protocol, shuaxinCursor: "0" });
+      await connectWebtaskSocket();
       return { ok: true };
     })();
   }
@@ -701,6 +896,7 @@ api.runtime.onInstalled.addListener(() => {
       await api.storage.local.set({ tasks: DEFAULT_TASKS });
     }
     await schedulePolling(state.pollIntervalMinutes);
+    await connectWebtaskSocket();
   })();
 });
 
@@ -709,6 +905,7 @@ api.runtime.onStartup.addListener(() => {
     await ensureDefaults();
     const state = await getStoredState();
     await schedulePolling(state.pollIntervalMinutes);
+    await connectWebtaskSocket();
   })();
 });
 
@@ -716,4 +913,5 @@ api.runtime.onStartup.addListener(() => {
   await ensureDefaults();
   const state = await getStoredState();
   await schedulePolling(state.pollIntervalMinutes);
+  await connectWebtaskSocket();
 })();

@@ -9,6 +9,8 @@ const tasksEl = document.getElementById("tasks");
 const logsEl = document.getElementById("logs");
 const intervalInput = document.getElementById("interval-input");
 const protocolSelect = document.getElementById("protocol-select");
+const clientIdInput = document.getElementById("client-id-input");
+const copyClientIdBtn = document.getElementById("copy-client-id");
 const importOpen = document.getElementById("import-open");
 const importModal = document.getElementById("import-modal");
 const importText = document.getElementById("import-text");
@@ -201,9 +203,30 @@ async function loadState() {
   apiKeyInput.value = state.webtaskApiKey || "";
   intervalInput.value = state.pollIntervalMinutes || "";
   protocolSelect.value = state.protocol || "webtask";
+  clientIdInput.value = state.clientId || "";
   renderStatus(state.connection || {});
   renderTasks(state.tasks || [], state.taskStatus || {});
   renderLogs(state.logs || []);
+}
+
+async function copyClientId() {
+  const clientId = clientIdInput.value.trim();
+  if (!clientId) {
+    window.alert("Client ID 暂不可用，请稍后重试");
+    return;
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(clientId);
+    } else {
+      clientIdInput.focus();
+      clientIdInput.select();
+      document.execCommand("copy");
+    }
+    window.alert("Client ID 已复制");
+  } catch (error) {
+    window.alert("复制失败，请手动复制");
+  }
 }
 
 function showImportModal() {
@@ -394,6 +417,8 @@ clearLogsBtn?.addEventListener("click", async () => {
 logsModalClose.addEventListener("click", () => {
   logsModal.classList.add("hidden");
 });
+
+copyClientIdBtn.addEventListener("click", copyClientId);
 
 taskSearch.addEventListener("input", (event) => {
   searchTerm = event.target.value.trim();

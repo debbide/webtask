@@ -371,6 +371,124 @@ function normalizeTask(task) {
   return normalized;
 }
 
+function parseCooldownRangeMinutes(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const rangeMatch = raw.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)$/);
+  if (rangeMatch) {
+    const left = Number(rangeMatch[1]);
+    const right = Number(rangeMatch[2]);
+    if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0 || right <= 0) {
+      return null;
+    }
+    return {
+      min: Math.min(left, right),
+      max: Math.max(left, right)
+    };
+  }
+  const single = Number(raw);
+  if (!Number.isFinite(single) || single <= 0) {
+    return null;
+  }
+  return { min: single, max: single };
+}
+
+function hasTaskTimer(task) {
+  return !!(task && parseCooldownRangeMinutes(task.cooldownMinutes));
+}
+
+function randomIntBetween(min, max) {
+  const start = Math.min(min, max);
+  const end = Math.max(min, max);
+  if (start === end) return start;
+  return Math.floor(Math.random() * (end - start + 1)) + start;
+}
+
+function computeNextRunAt(task, baseTime) {
+  const range = parseCooldownRangeMinutes(task && task.cooldownMinutes);
+  if (!range) return 0;
+  const timerMode = task && task.timerMode === "window" ? "window" : "exact";
+  const minMs = Math.max(1000, Math.floor(range.min * 60 * 1000));
+  const maxMs = Math.max(minMs, Math.floor(range.max * 60 * 1000));
+  let delayMs = timerMode === "window" ? randomIntBetween(minMs, maxMs) : minMs;
+  if (timerMode === "window") {
+    const windowSeconds = Number(task.windowSeconds);
+    if (Number.isFinite(windowSeconds) && windowSeconds > 0) {
+      delayMs += randomIntBetween(0, Math.floor(windowSeconds * 1000));
+    }
+  }
+  const base = Number.isFinite(baseTime) ? baseTime : Date.now();
+  return base + delayMs;
+}
+
+async function ensureTaskNextRunAt(state, now) {
+  const tasks = state.tasks || [];
+  const taskStatus = { ...(state.taskStatus || {}) };
+  let changed = false;
+  for (const task of tasks) {
+    if (task && task.enabled === false) {
+      continue;
+    }
+    if (!hasTaskTimer(task)) {
+      continue;
+    }
+    const current = taskStatus[task.name] || {};
+    if (Number.isFinite(current.nextRunAt) && current.nextRunAt > 0) {
+      continue;
+    }
+    let nextRunAt = now;
+    if (Number.isFinite(current.lastRun) && current.lastRun > 0) {
+      nextRunAt = computeNextRunAt(task, current.lastRun);
+    }
+    taskStatus[task.name] = {
+      ...current,
+      nextRunAt
+    };
+    changed = true;
+  }
+  if (changed) {
+    await api.storage.local.set({ taskStatus });
+  }
+  return taskStatus;
+}
+
+async function runLocalScheduledTasks(state, source) {
+  if (source === "ws" || currentJob) {
+    return;
+  }
+  const tasks = state.tasks || [];
+  const now = Date.now();
+  const taskStatus = await ensureTaskNextRunAt(state, now);
+  let candidate = null;
+  let candidateNextRunAt = Number.POSITIVE_INFINITY;
+
+  for (const task of tasks) {
+    if (!task || task.enabled === false || !hasTaskTimer(task)) {
+      continue;
+    }
+    const status = taskStatus[task.name] || {};
+    const nextRunAt = Number(status.nextRunAt);
+    if (!Number.isFinite(nextRunAt)) {
+      continue;
+    }
+    if (nextRunAt <= now && nextRunAt < candidateNextRunAt) {
+      candidate = task;
+      candidateNextRunAt = nextRunAt;
+    }
+  }
+
+  if (!candidate) {
+    return;
+  }
+
+  await startTask(candidate.name, candidate.defaultData || {}, false, {
+    triggerSource: "alarm"
+  });
+}
+
 async function updateConnection(connected, lastError) {
   const state = await getStoredState();
   const next = {
@@ -387,13 +505,28 @@ async function addLog(entry) {
   await api.storage.local.set({ logs });
 }
 
-async function updateTaskStatus(taskName, success, message) {
+async function updateTaskStatus(taskName, success, message, metadata) {
   const state = await getStoredState();
   const taskStatus = { ...state.taskStatus };
-  taskStatus[taskName] = {
+  const current = taskStatus[taskName] || {};
+  const next = {
+    ...current,
     lastRun: Date.now(),
     lastResult: success ? "success" : "fail",
     message: message || ""
+  };
+  const triggerSource = metadata && metadata.triggerSource;
+  if (triggerSource) {
+    next.lastTriggerSource = triggerSource;
+  }
+  const nextRunAt = metadata && metadata.nextRunAt;
+  if (Number.isFinite(nextRunAt) && nextRunAt > 0) {
+    next.nextRunAt = nextRunAt;
+  } else {
+    delete next.nextRunAt;
+  }
+  taskStatus[taskName] = {
+    ...next
   };
   await api.storage.local.set({ taskStatus });
 }
@@ -441,7 +574,10 @@ async function finishJob(job, success, message, variables, keepOpen) {
   clearTimeout(job.timeoutId);
   clearJobHeartbeat(job);
   currentJob = null;
-  await updateTaskStatus(job.task.name, success, message);
+  await updateTaskStatus(job.task.name, success, message, {
+    triggerSource: job.triggerSource,
+    nextRunAt: computeNextRunAt(job.task, Date.now())
+  });
   await addLog({
     time: Date.now(),
     task: job.task.name,
@@ -460,6 +596,9 @@ async function finishJob(job, success, message, variables, keepOpen) {
 
 async function startTask(taskName, data, manualTrigger, options) {
   const taskOptions = options || {};
+  const triggerSource =
+    taskOptions.triggerSource ||
+    (manualTrigger ? "manual" : "remote");
   if (currentJob) {
     return { ok: false, message: "busy" };
   }
@@ -492,7 +631,8 @@ async function startTask(taskName, data, manualTrigger, options) {
     timeoutId: null,
     heartbeatId: null,
     manualTrigger: !!manualTrigger,
-    serverJobId: taskOptions.jobId || ""
+    serverJobId: taskOptions.jobId || "",
+    triggerSource
   };
 
   const state = await getStoredState();
@@ -518,6 +658,7 @@ async function startTask(taskName, data, manualTrigger, options) {
 
 async function handlePoll(source) {
   const state = await getStoredState();
+  await runLocalScheduledTasks(state, source);
   const webhookUrl = state.webhookUrl;
   if (!webhookUrl || (state.protocol === "webtask" && currentJob)) {
     return;
@@ -559,7 +700,8 @@ async function handlePoll(source) {
       return;
     }
     const started = await startTask(payload.task, payload.data || {}, false, {
-      jobId: payload.job_id || ""
+      jobId: payload.job_id || "",
+      triggerSource: "remote"
     });
     if (!started.ok && source === "ws") {
       await addLog({
@@ -687,11 +829,12 @@ api.runtime.onMessage.addListener((message, sender) => {
   if (message.type === "getState") {
     return (async () => {
       const state = await getStoredState();
+      const taskStatus = await ensureTaskNextRunAt(state, Date.now());
       return {
         webhookUrl: state.webhookUrl,
         webtaskApiKey: state.webtaskApiKey,
         connection: state.connection,
-        taskStatus: state.taskStatus,
+        taskStatus,
         logs: state.logs,
         pollIntervalMinutes: state.pollIntervalMinutes,
         protocol: state.protocol,
@@ -704,7 +847,10 @@ api.runtime.onMessage.addListener((message, sender) => {
           script: task.script || "",
           timeout: task.timeout,
           enabled: task.enabled !== false,
-          defaultData: task.defaultData || {}
+          defaultData: task.defaultData || {},
+          timerMode: task.timerMode,
+          cooldownMinutes: task.cooldownMinutes,
+          windowSeconds: task.windowSeconds
         }))
       };
     })();
@@ -775,15 +921,19 @@ api.runtime.onMessage.addListener((message, sender) => {
     })();
   }
 
-    if (message.type === "importTask") {
-      return (async () => {
-        const task = normalizeTask(message.task);
-        const error = validateTask(task);
-        if (error) {
-          return { ok: false, message: error };
-        }
+  if (message.type === "importTask") {
+    return (async () => {
+      const task = normalizeTask(message.task);
+      const error = validateTask(task);
+      if (error) {
+        return { ok: false, message: error };
+      }
       const tasks = await getTasks();
-      const exists = tasks.find((item) => item.name === task.name);
+      const replaceTaskName =
+        typeof message.replaceTaskName === "string" ? message.replaceTaskName.trim() : "";
+      const exists = tasks.find(
+        (item) => item.name === task.name && item.name !== replaceTaskName
+      );
       if (exists && !message.allowOverwrite) {
         return { ok: false, message: "Task name already exists" };
       }
@@ -791,9 +941,23 @@ api.runtime.onMessage.addListener((message, sender) => {
         ...task,
         enabled: task.enabled !== false
       };
-      const nextTasks = tasks.filter((item) => item.name !== task.name);
+      const nextTasks = tasks.filter(
+        (item) => item.name !== task.name && item.name !== replaceTaskName
+      );
       nextTasks.push(normalizedTask);
-      await api.storage.local.set({ tasks: nextTasks });
+      const state = await getStoredState();
+      const taskStatus = { ...(state.taskStatus || {}) };
+      if (hasTaskTimer(normalizedTask) && normalizedTask.enabled !== false) {
+        const currentStatus = taskStatus[normalizedTask.name] || {};
+        taskStatus[normalizedTask.name] = {
+          ...currentStatus,
+          nextRunAt: Date.now()
+        };
+      }
+      if (replaceTaskName && replaceTaskName !== normalizedTask.name) {
+        delete taskStatus[replaceTaskName];
+      }
+      await api.storage.local.set({ tasks: nextTasks, taskStatus });
       return { ok: true };
     })();
   }
@@ -806,7 +970,10 @@ api.runtime.onMessage.addListener((message, sender) => {
       }
       const tasks = await getTasks();
       const nextTasks = tasks.filter((item) => item.name !== name);
-      await api.storage.local.set({ tasks: nextTasks });
+      const state = await getStoredState();
+      const taskStatus = { ...(state.taskStatus || {}) };
+      delete taskStatus[name];
+      await api.storage.local.set({ tasks: nextTasks, taskStatus });
       return { ok: true };
     })();
   }
@@ -819,10 +986,25 @@ api.runtime.onMessage.addListener((message, sender) => {
         return { ok: false, message: "Task name is required" };
       }
       const tasks = await getTasks();
+      const targetTask = tasks.find((task) => task.name === name) || null;
       const nextTasks = tasks.map((task) =>
         task.name === name ? { ...task, enabled } : task
       );
-      await api.storage.local.set({ tasks: nextTasks });
+      const state = await getStoredState();
+      const taskStatus = { ...(state.taskStatus || {}) };
+      const current = taskStatus[name] || {};
+      if (enabled && targetTask && hasTaskTimer(targetTask)) {
+        taskStatus[name] = {
+          ...current,
+          nextRunAt: Number.isFinite(current.nextRunAt) && current.nextRunAt > 0 ? current.nextRunAt : Date.now()
+        };
+      } else if (taskStatus[name]) {
+        taskStatus[name] = {
+          ...current,
+          nextRunAt: 0
+        };
+      }
+      await api.storage.local.set({ tasks: nextTasks, taskStatus });
       return { ok: true };
     })();
   }
@@ -851,7 +1033,9 @@ api.runtime.onMessage.addListener((message, sender) => {
 
   if (message.type === "triggerTask") {
     return (async () => {
-      const result = await startTask(message.taskName, message.data || {}, true);
+      const result = await startTask(message.taskName, message.data || {}, true, {
+        triggerSource: "manual"
+      });
       return result;
     })();
   }

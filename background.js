@@ -9,6 +9,10 @@ const WS_RECONNECT_BASE_MS = 2000;
 const WS_RECONNECT_MAX_MS = 60000;
 const HEARTBEAT_INTERVAL_MS = 30000;
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const DEFAULT_TASKS = [
   {
     name: "minestrator_restart",
@@ -722,8 +726,7 @@ async function runJobSteps(job) {
   }
   job.state = "running";
   try {
-    await api.tabs.executeScript(job.tabId, { file: "content.js" });
-    const response = await api.tabs.sendMessage(job.tabId, {
+    const messagePayload = {
       type: job.task.script ? "runScript" : "runTask",
       taskName: job.task.name,
       steps: job.task.steps,
@@ -731,7 +734,32 @@ async function runJobSteps(job) {
       data: job.data,
       startIndex: job.stepIndex,
       variables: job.variables
-    });
+    };
+
+    let response = null;
+    let lastError = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await api.tabs.executeScript(job.tabId, { file: "content.js" });
+        response = await api.tabs.sendMessage(job.tabId, messagePayload);
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        const msg = String((error && error.message) || "").toLowerCase();
+        const isNoReceiver =
+          msg.includes("receiving end does not exist") ||
+          msg.includes("could not establish connection");
+        if (!isNoReceiver || attempt === 4) {
+          throw error;
+        }
+        await sleep(800);
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
 
     if (!response) {
       await finishJob(job, false, "No response", job.variables, false);
@@ -1081,6 +1109,7 @@ api.runtime.onInstalled.addListener(() => {
     }
     await schedulePolling(state.pollIntervalMinutes);
     await connectWebtaskSocket();
+    await handlePoll("startup");
   })();
 });
 
@@ -1090,6 +1119,7 @@ api.runtime.onStartup.addListener(() => {
     const state = await getStoredState();
     await schedulePolling(state.pollIntervalMinutes);
     await connectWebtaskSocket();
+    await handlePoll("startup");
   })();
 });
 
@@ -1098,4 +1128,5 @@ api.runtime.onStartup.addListener(() => {
   const state = await getStoredState();
   await schedulePolling(state.pollIntervalMinutes);
   await connectWebtaskSocket();
+  await handlePoll("startup");
 })();

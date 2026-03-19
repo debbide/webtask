@@ -13,10 +13,15 @@ const clientIdInput = document.getElementById("client-id-input");
 const copyClientIdBtn = document.getElementById("copy-client-id");
 const importOpen = document.getElementById("import-open");
 const importModal = document.getElementById("import-modal");
+const importModalTitle = importModal.querySelector(".modal-title");
 const importText = document.getElementById("import-text");
 const importConfirm = document.getElementById("import-confirm");
 const importCancel = document.getElementById("import-cancel");
 const importError = document.getElementById("import-error");
+const taskTimerModeInput = document.getElementById("task-timer-mode");
+const taskCooldownMinMinutesInput = document.getElementById("task-cooldown-min-minutes");
+const taskCooldownMaxMinutesInput = document.getElementById("task-cooldown-max-minutes");
+const taskWindowSecondsInput = document.getElementById("task-window-seconds");
 const logsModal = document.getElementById("logs-modal");
 const logsModalTitle = document.getElementById("logs-modal-title");
 const logsModalList = document.getElementById("logs-modal-list");
@@ -31,10 +36,38 @@ let editingTaskName = null;
 let logFilterTask = "";
 let lastLogs = [];
 
+function markSettingsDirty() {
+  input.dataset.dirty = "1";
+  apiKeyInput.dataset.dirty = "1";
+  intervalInput.dataset.dirty = "1";
+  protocolSelect.dataset.dirty = "1";
+}
+
+function clearSettingsDirty() {
+  input.dataset.dirty = "0";
+  apiKeyInput.dataset.dirty = "0";
+  intervalInput.dataset.dirty = "0";
+  protocolSelect.dataset.dirty = "0";
+}
+
+function setFieldValueIfClean(element, value) {
+  if (!element) return;
+  if (element.dataset.dirty === "1") return;
+  if (document.activeElement === element) return;
+  element.value = value;
+}
+
 function formatTime(value) {
   if (!value) return "--";
   const date = new Date(value);
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+}
+
+function formatTriggerSource(source) {
+  if (source === "manual") return "手动";
+  if (source === "alarm") return "定时";
+  if (source === "remote") return "外部";
+  return "--";
 }
 
 function renderStatus(connection) {
@@ -117,9 +150,11 @@ function renderTasks(tasks, taskStatus) {
 
     const nameCell = document.createElement("div");
     nameCell.className = "col-name";
+    const nextRunAt = status && status.nextRunAt ? formatTime(status.nextRunAt) : "--";
+    const triggerSource = formatTriggerSource(status && status.lastTriggerSource);
     nameCell.innerHTML = `<div class="task-name">${task.label || task.name}</div><div class="task-sub">${
       task.name
-    }</div>`;
+    }</div><div class="task-sub">下次: ${nextRunAt} · 来源: ${triggerSource}</div>`;
 
     const typeCell = document.createElement("div");
     typeCell.className = "col-type task-type";
@@ -199,10 +234,10 @@ async function loadState() {
   if (!state) {
     return;
   }
-  input.value = state.webhookUrl || "";
-  apiKeyInput.value = state.webtaskApiKey || "";
-  intervalInput.value = state.pollIntervalMinutes || "";
-  protocolSelect.value = state.protocol || "webtask";
+  setFieldValueIfClean(input, state.webhookUrl || "");
+  setFieldValueIfClean(apiKeyInput, state.webtaskApiKey || "");
+  setFieldValueIfClean(intervalInput, state.pollIntervalMinutes || "");
+  setFieldValueIfClean(protocolSelect, state.protocol || "webtask");
   clientIdInput.value = state.clientId || "";
   renderStatus(state.connection || {});
   renderTasks(state.tasks || [], state.taskStatus || {});
@@ -232,13 +267,25 @@ async function copyClientId() {
 function showImportModal() {
   importError.textContent = "";
   importText.value = "";
+  taskTimerModeInput.value = "exact";
+  taskCooldownMinMinutesInput.value = "";
+  taskCooldownMaxMinutesInput.value = "";
+  taskWindowSecondsInput.value = "";
   editingTaskName = null;
+  importConfirm.textContent = "导入";
+  if (importModalTitle) {
+    importModalTitle.textContent = "导入任务 JSON";
+  }
   importModal.classList.remove("hidden");
 }
 
 function hideImportModal() {
   importModal.classList.add("hidden");
   editingTaskName = null;
+  importConfirm.textContent = "导入";
+  if (importModalTitle) {
+    importModalTitle.textContent = "导入任务 JSON";
+  }
 }
 
 function validateTask(task) {
@@ -272,14 +319,76 @@ function validateTask(task) {
       }
     }
   }
+  if (task.timerMode !== undefined && task.timerMode !== "exact" && task.timerMode !== "window") {
+    return "timerMode 仅支持 exact 或 window";
+  }
+  if (task.cooldownMinutes !== undefined) {
+    const raw = String(task.cooldownMinutes).trim();
+    const rangeMatch = raw.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)$/);
+    if (!rangeMatch) {
+      const single = Number(raw);
+      if (!Number.isFinite(single) || single <= 0) {
+        return "cooldownMinutes 必须是正数，或区间格式如 180-360";
+      }
+    } else {
+      const left = Number(rangeMatch[1]);
+      const right = Number(rangeMatch[2]);
+      if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0 || right <= 0) {
+        return "cooldownMinutes 区间必须是正数，如 180-360";
+      }
+    }
+  }
+  if (task.windowSeconds !== undefined) {
+    const windowSeconds = Number(task.windowSeconds);
+    if (!Number.isFinite(windowSeconds) || windowSeconds < 0) {
+      return "windowSeconds 必须为大于等于 0 的数字";
+    }
+  }
   return "";
 }
 
 function normalizeTask(task) {
-  if (Array.isArray(task.script)) {
-    return { ...task, script: task.script.join("\n") };
+  const normalized = Array.isArray(task.script) ? { ...task, script: task.script.join("\n") } : { ...task };
+  if (normalized.cooldownMinutes !== undefined) {
+    normalized.cooldownMinutes = String(normalized.cooldownMinutes).trim();
   }
-  return task;
+  if (normalized.windowSeconds !== undefined) {
+    normalized.windowSeconds = Number(normalized.windowSeconds);
+  }
+  return normalized;
+}
+
+function parseCooldownRangeForForm(value) {
+  const text = String(value || "").trim();
+  if (!text) return { min: "", max: "" };
+  const rangeMatch = text.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)$/);
+  if (rangeMatch) {
+    return { min: rangeMatch[1], max: rangeMatch[2] };
+  }
+  return { min: text, max: text };
+}
+
+function applyTimerFields(task) {
+  const mode = taskTimerModeInput.value === "window" ? "window" : "exact";
+  const cooldownMin = taskCooldownMinMinutesInput.value.trim();
+  const cooldownMax = taskCooldownMaxMinutesInput.value.trim();
+  const windowSeconds = taskWindowSecondsInput.value.trim();
+  const nextTask = { ...task, timerMode: mode };
+  if (cooldownMin && cooldownMax) {
+    nextTask.cooldownMinutes = Number(cooldownMin) === Number(cooldownMax) ? cooldownMin : `${cooldownMin}-${cooldownMax}`;
+  } else if (cooldownMin) {
+    nextTask.cooldownMinutes = cooldownMin;
+  } else if (cooldownMax) {
+    nextTask.cooldownMinutes = cooldownMax;
+  } else {
+    delete nextTask.cooldownMinutes;
+  }
+  if (windowSeconds) {
+    nextTask.windowSeconds = Number(windowSeconds);
+  } else {
+    delete nextTask.windowSeconds;
+  }
+  return nextTask;
 }
 
 async function importTask() {
@@ -296,23 +405,22 @@ async function importTask() {
     importError.textContent = error;
     return;
   }
-  task = normalizeTask(task);
-  const exists = currentTasks.find((item) => item.name === task.name);
-  const allowOverwrite = editingTaskName
-    ? true
-    : exists
-      ? window.confirm("任务已存在，是否覆盖？")
-      : false;
+  task = normalizeTask(applyTimerFields(task));
+  const exists = currentTasks.find(
+    (item) => item.name === task.name && item.name !== editingTaskName
+  );
+  const allowOverwrite = exists ? window.confirm("任务已存在，是否覆盖？") : false;
   if (exists && !allowOverwrite) {
     return;
   }
   const response = await api.runtime.sendMessage({
     type: "importTask",
     task,
-    allowOverwrite
+    allowOverwrite,
+    replaceTaskName: editingTaskName || ""
   });
   if (!response || !response.ok) {
-    importError.textContent = response && response.message ? response.message : "导入失败";
+    importError.textContent = response && response.message ? response.message : editingTaskName ? "保存失败" : "导入失败";
     return;
   }
   hideImportModal();
@@ -350,7 +458,16 @@ function renderLogsModal() {
 function openEditTask(task) {
   editingTaskName = task.name;
   importError.textContent = "";
+  importConfirm.textContent = "保存";
+  if (importModalTitle) {
+    importModalTitle.textContent = "编辑任务 JSON";
+  }
   importText.value = JSON.stringify(task, null, 2);
+  taskTimerModeInput.value = task.timerMode === "window" ? "window" : "exact";
+  const cooldownRange = parseCooldownRangeForForm(task.cooldownMinutes);
+  taskCooldownMinMinutesInput.value = cooldownRange.min;
+  taskCooldownMaxMinutesInput.value = cooldownRange.max;
+  taskWindowSecondsInput.value = task.windowSeconds !== undefined ? String(task.windowSeconds) : "";
   importModal.classList.remove("hidden");
 }
 
@@ -381,17 +498,23 @@ async function deleteTask(task) {
 }
 
 saveBtn.addEventListener("click", async () => {
-  await api.runtime.sendMessage({ type: "setWebhookUrl", webhookUrl: input.value.trim() });
-  await api.storage.local.set({ webtaskApiKey: apiKeyInput.value.trim() });
-  await api.runtime.sendMessage({ type: "setProtocol", protocol: protocolSelect.value });
-  const intervalValue = parseFloat(intervalInput.value);
-  if (Number.isFinite(intervalValue) && intervalValue > 0) {
-    await api.runtime.sendMessage({
-      type: "setPollInterval",
-      pollIntervalMinutes: intervalValue
-    });
+  try {
+    const apiKey = apiKeyInput.value.trim();
+    await api.runtime.sendMessage({ type: "setWebtaskApiKey", webtaskApiKey: apiKey });
+    await api.runtime.sendMessage({ type: "setWebhookUrl", webhookUrl: input.value.trim() });
+    await api.runtime.sendMessage({ type: "setProtocol", protocol: protocolSelect.value });
+    const intervalValue = parseFloat(intervalInput.value);
+    if (Number.isFinite(intervalValue) && intervalValue > 0) {
+      await api.runtime.sendMessage({
+        type: "setPollInterval",
+        pollIntervalMinutes: intervalValue
+      });
+    }
+    clearSettingsDirty();
+    await loadState();
+  } catch (error) {
+    window.alert(`保存失败：${error && error.message ? error.message : "unknown error"}`);
   }
-  await loadState();
 });
 
 testBtn.addEventListener("click", async () => {
@@ -436,6 +559,13 @@ logsModal.addEventListener("click", (event) => {
     logsModal.classList.add("hidden");
   }
 });
+
+input.addEventListener("input", markSettingsDirty);
+apiKeyInput.addEventListener("input", markSettingsDirty);
+intervalInput.addEventListener("input", markSettingsDirty);
+protocolSelect.addEventListener("change", markSettingsDirty);
+
+clearSettingsDirty();
 
 api.storage.onChanged.addListener(() => {
   loadState();

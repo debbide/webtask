@@ -15,3 +15,4 @@ web-ext-artifacts/
 .env.*
 tmp/
 profile/
+scripts/

@@ -1,2 +1,17 @@
 automa-src/
 minestrator_restart.automa.json
+.claude/
+*.code-workspace
+openclaw.sh
+*AxentHost*.txt
+node_modules/
+dist/
+coverage/
+web-ext-artifacts/
+*.xpi
+*.zip
+*.log
+.env
+.env.*
+tmp/
+profile/

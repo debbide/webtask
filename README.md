@@ -1,18 +1,43 @@
 # WebTask Extension
 
-Browser extension for polling WebTask tasks and running automation steps/scripts.
+Firefox-first browser extension for polling WebTask tasks and running
+automation steps/scripts.
 
 ## Setup
 
-1) Load the extension in your browser (developer mode).
-2) Open the popup or dashboard page.
-3) Set **Webhook URL** to your panel base URL (or `/api/webtask`).
-4) (Optional) Set **API Key** if your panel enables auth.
-5) Click **Save** and then **Test**.
+1. Open Firefox and go to `about:debugging#/runtime/this-firefox`.
+2. Click **Load Temporary Add-on**.
+3. Select `manifest.json` from this repository.
+4. Open the WebTask toolbar popup or the extension options dashboard.
+5. Set **Webhook URL** to your panel base URL, or directly to `/api/webtask`.
+6. Optional: set **API Key** if your panel enables auth.
+7. Click **Save** and then **Test**.
 
 Webhook URL examples:
 - `https://panel.example.com`
 - `https://panel.example.com/api/webtask`
+
+## Repository Layout
+
+The Firefox entry points stay simple while the source is grouped by purpose:
+
+- `manifest.json`, `background.js`, `content.js`
+- `popup/` - toolbar popup UI
+- `dashboard/` - full options/dashboard UI
+- `shared/` - background/page helper modules
+- `tasks/` - task JSON definitions
+- `scripts/` - local validation scripts
+
+See `docs/PROJECT_STRUCTURE.md` for the cleanup map and `docs/TASKS.md` for the
+current task JSON inventory.
+
+## Checks
+
+Run the local repository self-check:
+
+```sh
+npm run check
+```
 
 ## Task Scripts
 

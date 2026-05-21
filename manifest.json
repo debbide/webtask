@@ -5,8 +5,15 @@
   "description": "Lightweight browser automation task runner for webhooks.",
   "permissions": ["alarms", "tabs", "storage", "<all_urls>"],
   "background": {
-    "scripts": ["background.js"]
+    "scripts": ["shared/task-validation.js", "shared/security.js", "shared/background-defaults.js", "shared/background-utils.js", "shared/storage-helpers.js", "shared/status-helpers.js", "shared/remote-helpers.js", "shared/http-helpers.js", "shared/state-response.js", "shared/task-mutations.js", "shared/job-helpers.js", "shared/scheduler-helpers.js", "shared/tab-helpers.js", "shared/run-result-helpers.js", "shared/websocket-helpers.js", "background.js"]
   },
+  "content_scripts": [
+    {
+      "matches": ["https://app.axenthost.com/*"],
+      "css": ["sites/axenthost/ad-clean.css"],
+      "run_at": "document_start"
+    }
+  ],
   "browser_specific_settings": {
     "gecko": {
       "id": "webtask@local",
@@ -15,10 +22,10 @@
   },
   "browser_action": {
     "default_title": "WebTask",
-    "default_popup": "popup.html"
+    "default_popup": "popup/popup.html"
   },
   "options_ui": {
-    "page": "dashboard.html",
+    "page": "dashboard/dashboard.html",
     "open_in_tab": true
   }
 }
